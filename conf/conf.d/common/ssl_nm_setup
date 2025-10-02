@@ -1,0 +1,4 @@
+# include /etc/nginx/conf.d/common/ssl_setup;
+
+# ssl_certificate /etc/nginx/ssl/wildcard.norme.marche.it-pub.pem;
+# ssl_certificate_key /etc/nginx/ssl/wildcard.norme.marche.it-priv.key;

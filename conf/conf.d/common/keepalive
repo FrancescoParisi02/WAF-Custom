@@ -1,0 +1,3 @@
+# #keepalive 20;
+# keepalive_timeout 5s; # riduce il tempo massimo di keepalive a 5 secondi
+# keepalive_requests 10000; 

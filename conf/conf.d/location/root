@@ -1,0 +1,14 @@
+# location / {
+#     include /etc/nginx/conf.d/common/proxy_params;
+#     proxy_cache default_cache;
+#     # rewrite ^(.*)$ http://pretorio.farm.regionemarche.intra:8080/NormeMarche/$1 redirect;
+#     proxy_pass http://$tomcat/NormeMarche;        
+# }
+
+location / {
+    # specifico come gestire la connessione
+    include /etc/nginx/conf.d/common/proxy_params;
+    #proxy_cache default_cache;
+
+    proxy_pass http://backend/;
+}

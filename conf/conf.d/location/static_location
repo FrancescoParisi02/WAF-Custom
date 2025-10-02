@@ -1,0 +1,8 @@
+# location ~* \.(?:css|js|jpg|jpeg|png|gif|ico|woff2?|eot|ttf|otf)$ {
+#     include /etc/nginx/conf.d/common/proxy_params;
+#     proxy_cache static_cache;
+#     proxy_pass http://backend/;
+#     expires 30d;
+#     add_header Cache-Control "public, no-transform";
+#     #access_log off;
+# }

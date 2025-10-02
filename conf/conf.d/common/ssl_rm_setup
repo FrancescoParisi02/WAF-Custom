@@ -1,0 +1,4 @@
+# include /etc/nginx/conf.d/common/ssl_setup;
+
+# ssl_certificate /etc/nginx/ssl/regione.pem;
+# ssl_certificate_key /etc/nginx/ssl/regione_private.pem;

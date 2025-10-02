@@ -1,0 +1,7 @@
+# # # Massimo 100 connessioni simultanee per IP
+# # limit_conn slow_attack_con 100;
+# # # limite a 30 richieste al secondo dallo stesso ip, concedendo il permesso di brevi picchi di 100 richieste, bloccando quelle in eccesso
+# # limit_req zone=slow_attack_req burst=1000 nodelay; 
+
+# # chiudo le connessioni "in attesa" che non stanno inviando dati
+# reset_timedout_connection on;

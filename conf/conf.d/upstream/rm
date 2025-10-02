@@ -1,0 +1,38 @@
+# #--------------------------------
+# # chiediamo a Nginx di passare automaticamente a un altro server nell’upstream in caso di determinati errori.
+# #--------------------------------
+
+# # Specifica gli errori per cui Nginx deve passare a un altro server upstream
+# proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+
+# # Limita il numero di tentativi di connessione ai server upstream
+# proxy_next_upstream_tries 3;
+
+# # Timeout per rilevare più velocemente server non rispondenti
+#  proxy_connect_timeout 1s;
+# # proxy_connect_timeout     60;
+# # proxy_read_timeout 5s;
+# # proxy_send_timeout 5s;
+
+upstream backend {
+    server pow-shield-test-pow-shield-1:3000;    
+    server pow-shield-test-pow-shield-2:3000;
+    server pow-shield-test-pow-shield-3:3000;
+     server pow-shield-test-pow-shield-4:3000;
+     server pow-shield-test-pow-shield-5:3000;    
+     server pow-shield-test-pow-shield-6:3000;
+     server pow-shield-test-pow-shield-7:3000;
+     server pow-shield-test-pow-shield-8:3000;
+     server pow-shield-test-pow-shield-9:3000;
+     server pow-shield-test-pow-shield-10:3000;
+     server pow-shield-test-pow-shield-11:3000;    
+     server pow-shield-test-pow-shield-12:3000;
+     server pow-shield-test-pow-shield-13:3000;
+     server pow-shield-test-pow-shield-14:3000;
+     server pow-shield-test-pow-shield-15:3000;    
+     server pow-shield-test-pow-shield-16:3000;
+     server pow-shield-test-pow-shield-17:3000;
+     server pow-shield-test-pow-shield-18:3000;
+     server pow-shield-test-pow-shield-19:3000;
+     server pow-shield-test-pow-shield-20:3000;
+}
