@@ -1,9 +1,9 @@
 # TODO: i've comment all the machine limits such as cpu, ram etc, we'll decide futher in case we'd need them
 
-#version: '2'
-# networks:
-#     www:
-#         driver: bridge
+version: '2'
+networks:
+    www:
+        driver: bridge
 
 services:
   nginx:
@@ -13,10 +13,13 @@ services:
       - 443:443
       - 80:80
     volumes:
-      # - ./conf/conf.d:/etc/nginx/conf.d:ro
-      # - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./conf/conf.d:/etc/nginx/conf.d:ro
+
       # - ./conf/ssl:/etc/nginx/ssl:ro
       # - ./logs:/var/log/nginx
+    # extra_hosts:
+    #   - "ws:172.20.0.113"  
     depends_on:
       - pow-shield
     # cpus: ''
@@ -37,14 +40,19 @@ services:
 
   pow-shield:
     image: powshield/pow-shield
-    # container_name: pow-shield-test-pow-shield-1 # tolgo se uso replicas
+    container_name: pow-shield-test-1 # tolgo se uso replicas
+    ports:
+      - 3000:3000
     env_file:
-      - .env
+      - .env_pow
+    extra_hosts:
+      - "ws:172.20.0.113"  
     depends_on:
       - redis
     # cpus: ''
     # mem_limit: ''
-    # volumes:
+    volumes:
+      - .env_pow:/usr/src/pow-shield/.env
     #   -
     # deploy:
     #   replicas: 
