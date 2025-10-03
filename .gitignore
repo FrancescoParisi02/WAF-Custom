@@ -2,7 +2,7 @@ pow-shield-test/conf.txt
 pow-shield-test/logs
 pow-shield-test/conf/ssl
 
-.env_test
+.env*
 # Created by https://www.toptal.com/developers/gitignore/api/linux,vim,visualstudiocode,kate,ssh
 # Edit at https://www.toptal.com/developers/gitignore?templates=linux,vim,visualstudiocode,kate,ssh
 
