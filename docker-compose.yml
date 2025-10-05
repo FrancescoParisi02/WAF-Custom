@@ -1,58 +1,40 @@
-# TODO: i've comment all the machine limits such as cpu, ram etc, we'll decide futher in case we'd need them
 
-version: '2'
 networks:
-    www:
-        driver: bridge
+  www:
+    driver: bridge
 
 services:
-  nginx:
-    image: nginx:stable-alpine-slim
-    restart: unless-stopped
-    ports:
-      - 443:443
-      - 80:80
-    volumes:
-      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./conf/conf.d:/etc/nginx/conf.d:ro
-
-      # - ./conf/ssl:/etc/nginx/ssl:ro
-      # - ./logs:/var/log/nginx
-    # extra_hosts:
-    #   - "ws:172.20.0.113"  
-    depends_on:
-      - pow-shield
-    # cpus: ''
-
-    # ulimits:
-    #   nofile:
-    #     soft:
-    #     hard: 
-    #   nproc:
-    #     soft: 
-    #     hard: 
-
   redis:
-    #image: redis:7.4-alpine
     image: redis:8-alpine
     restart: always
-    # cpus: ''
+    networks:
+      - www
 
   pow-shield:
-    image: powshield/pow-shield
-    container_name: pow-shield-test-1 # tolgo se uso replicas
+    build:
+      context: ./powshield-custom
+    container_name: pow-shield-test-1
     ports:
-      - 3000:3000
-    env_file:
-      - .env_pow
+      - "3000:3000"
     extra_hosts:
-      - "ws:172.20.0.113"  
+      - "apache-site:172.20.0.113"
+    volumes:
+      - ./.env:/usr/src/pow-shield/.env   # monta il file singolo
     depends_on:
       - redis
-    # cpus: ''
-    # mem_limit: ''
-    volumes:
-      - .env_pow:/usr/src/pow-shield/.env
-    #   -
-    # deploy:
-    #   replicas: 
+    networks:
+      - www
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx-custom/Dockerfile
+    container_name: nginx-1
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - pow-shield
+    networks:
+      - www
