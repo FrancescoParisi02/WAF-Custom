@@ -1,8 +1,10 @@
 pow-shield-test/conf.txt
 pow-shield-test/logs
 pow-shield-test/conf/ssl
-
+wazuh-agent-4.13.1-1.x86_64.rpm
 .env*
+access.log
+error.log
 # Created by https://www.toptal.com/developers/gitignore/api/linux,vim,visualstudiocode,kate,ssh
 # Edit at https://www.toptal.com/developers/gitignore?templates=linux,vim,visualstudiocode,kate,ssh
 

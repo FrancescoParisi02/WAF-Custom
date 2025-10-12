@@ -31,6 +31,10 @@ services:
       dockerfile: nginx-custom/Dockerfile
     container_name: nginx-1
     restart: unless-stopped
+    volumes:
+      - ./nginx-custom/access:/spool/logs:Z
+      # - ./nginx-custom/error:/spool/logs/error.log
+
     ports:
       - "80:80"
       - "443:443"
