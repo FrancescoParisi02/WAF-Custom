@@ -17,7 +17,7 @@ services:
     ports:
       - "3000:3000"
     extra_hosts:
-      - "apache-site:172.20.0.113"
+      - "d2ch-eccv.dii.univpm.it:172.20.0.113"
     volumes:
       - ./.env:/usr/src/pow-shield/.env   # monta il file singolo
     depends_on:
