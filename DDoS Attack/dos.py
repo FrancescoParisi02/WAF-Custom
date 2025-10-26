@@ -6,6 +6,9 @@ Mixed load tester:
   - simple: many simple HTTP clients that do not execute JS (fail PoW)
   - solver: small pool of headless browsers that execute JS and wait for PoW to finish
 
+Now writes average latency (ms) into the summary CSV.
+Per-request detail CSV is optional via --detail-csv.
+
 Comments are in English (user preference).
 """
 
@@ -23,6 +26,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+from csv import DictWriter
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -42,8 +46,52 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SOLVER_DEBUG_DIR = RESULTS_DIR / "solver_debug"
 SOLVER_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
+# detail csv is controlled by CLI flag --detail-csv
+DETAIL_CSV_DEFAULT = False
+
+# -------------------------
+# CSV detail logging helpers
+# -------------------------
+def mk_ts() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+def open_detail_logger(test_name: str):
+    """
+    Open a CSV that logs one row per attempt with latency and metadata.
+    Returns (file_handle, csv_writer, path_str).
+    """
+    ts = mk_ts()
+    path = RESULTS_DIR / f"{test_name}_detail_{ts}.csv"
+    f = path.open("w", newline="")
+    w = DictWriter(f, fieldnames=[
+        "ts_iso", "test", "worker_id", "iteration",
+        "status", "class", "latency_ms",
+        "is_redirect", "final_url", "location",
+        "had_pow_cookie", "error"
+    ])
+    w.writeheader()
+    return f, w, str(path)
+
+def close_detail_logger(fh):
+    try:
+        fh.flush()
+        fh.close()
+    except Exception:
+        pass
+
+# -------------------------
+# Metrics helpers
+# -------------------------
 def mk_metrics_container():
-    return {"total": 0, "ok_200": 0, "blocked": 0, "errors": 0, "other_status": Counter()}
+    return {
+        "total": 0,
+        "ok_200": 0,
+        "blocked": 0,
+        "errors": 0,
+        "other_status": Counter(),
+        "latency_sum_ms": 0,
+        "latency_count": 0,
+    }
 
 def is_blocked_response_text(text: str) -> bool:
     if not text:
@@ -66,11 +114,13 @@ def print_metrics(name: str, m: dict):
     ok = m["ok_200"]
     blocked = m["blocked"]
     errs = m["errors"]
+    avg_ms = (m["latency_sum_ms"] / m["latency_count"]) if m["latency_count"] else 0.0
     print(f"\n[{name}] SUMMARY")
     print(f"  total: {total}")
     print(f"  200 / total   : {ok}  ({ok/total*100:.2f}%)")
     print(f"  blocked / total: {blocked}  ({blocked/total*100:.2f}%)")
     print(f"  errors / total: {errs}  ({errs/total*100:.2f}%)")
+    print(f"  avg_latency_ms: {avg_ms:.2f}")
     if m["other_status"]:
         print("  other status counts:")
         for s, c in m["other_status"].items():
@@ -79,10 +129,11 @@ def print_metrics(name: str, m: dict):
 def write_csv_summary(base_filename: str, metrics: dict) -> str:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = RESULTS_DIR / f"{base_filename}_{ts}.csv"
+    avg_ms = (metrics["latency_sum_ms"] / metrics["latency_count"]) if metrics["latency_count"] else 0.0
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["total", "200", "blocked", "errors"])
-        w.writerow([metrics["total"], metrics["ok_200"], metrics["blocked"], metrics["errors"]])
+        w.writerow(["total", "200", "blocked", "errors", "avg_latency_ms"])
+        w.writerow([metrics["total"], metrics["ok_200"], metrics["blocked"], metrics["errors"], f"{avg_ms:.2f}"])
     return str(out_path)
 
 def classify_response(r: requests.Response) -> str:
@@ -107,37 +158,75 @@ def classify_response(r: requests.Response) -> str:
 # -------------------------
 # Test 1: volumetric_burst
 # -------------------------
-def volumetric_burst(target: str, num_threads: int = 200, requests_per_thread: int = 50, debug: bool = False):
+def volumetric_burst(target: str, num_threads: int = 200, requests_per_thread: int = 50, debug: bool = False, detail_csv: bool = False):
     print(f"[volumetric_burst] threads={num_threads}, req/thread={requests_per_thread}")
     metrics = mk_metrics_container()
     lock = threading.Lock()
     debug_counter = {"printed": 0}
 
+    detail_fh = detail_w = None
+    detail_path = ""
+    if detail_csv:
+        detail_fh, detail_w, detail_path = open_detail_logger("volumetric_burst")
+
     def worker(tid: int):
+        nonlocal detail_w
         for i in range(requests_per_thread):
+            t0 = time.perf_counter()
+            status = None
+            cls = "other"
+            loc = ""
+            final_url = ""
+            err = ""
+            is_redir = False
             try:
                 r = requests.get(target, timeout=8, allow_redirects=False)
+                status = r.status_code
+                loc = r.headers.get("Location", "") or ""
+                final_url = getattr(r, "url", "") or ""
+                is_redir = bool(getattr(r, "is_redirect", False))
                 cls = classify_response(r)
-                with lock:
-                    metrics["total"] += 1
-                    if cls == "ok":
-                        metrics["ok_200"] += 1
-                    elif cls == "blocked":
-                        metrics["blocked"] += 1
-                    else:
-                        metrics["other_status"][r.status_code] += 1
-                if debug and debug_counter["printed"] < DEBUG_PRINT_FIRST:
-                    with lock:
-                        print(f"[dbg][burst][tid={tid}] status={r.status_code} loc={r.headers.get('Location')} url={r.url}")
-                        debug_counter["printed"] += 1
             except Exception as e:
+                err = str(e)
+                with lock:
+                    metrics["errors"] += 1
+            finally:
+                t1 = time.perf_counter()
+                latency_ms = int((t1 - t0) * 1000)
+
                 with lock:
                     metrics["total"] += 1
-                    metrics["errors"] += 1
+                    metrics["latency_sum_ms"] += latency_ms
+                    metrics["latency_count"] += 1
+                    if status is not None:
+                        if cls == "ok":
+                            metrics["ok_200"] += 1
+                        elif cls == "blocked":
+                            metrics["blocked"] += 1
+                        else:
+                            metrics["other_status"][status] += 1
+
+                    if detail_w:
+                        detail_w.writerow({
+                            "ts_iso": datetime.utcnow().isoformat(),
+                            "test": "burst",
+                            "worker_id": tid,
+                            "iteration": i,
+                            "status": status if status is not None else "",
+                            "class": cls,
+                            "latency_ms": latency_ms,
+                            "is_redirect": is_redir,
+                            "final_url": final_url,
+                            "location": loc,
+                            "had_pow_cookie": "",   # n/a for burst
+                            "error": err,
+                        })
+
                 if debug and debug_counter["printed"] < DEBUG_PRINT_FIRST:
                     with lock:
-                        print(f"[dbg][burst][tid={tid}] exception: {e}")
+                        print(f"[dbg][burst][tid={tid}] status={status} loc={loc} url={final_url} latency_ms={latency_ms}")
                         debug_counter["printed"] += 1
+
             if i % 10 == 0:
                 time.sleep(0)
 
@@ -156,44 +245,87 @@ def volumetric_burst(target: str, num_threads: int = 200, requests_per_thread: i
     if CSV_LOG:
         path = write_csv_summary("volumetric_burst_summary", metrics)
         print(f"  CSV -> {path}")
+        if detail_path:
+            print(f"  CSV detail -> {detail_path}")
+
+    if detail_fh:
+        close_detail_logger(detail_fh)
 
 # -------------------------------------
 # Test 2: simple_unable_to_solve
 # -------------------------------------
-def simple_unable_to_solve(target: str, num_clients: int = 100, iterations: int = 5, delay_between: float = 0.5, debug: bool = False):
+def simple_unable_to_solve(target: str, num_clients: int = 100, iterations: int = 5, delay_between: float = 0.5, debug: bool = False, detail_csv: bool = False):
     print(f"[simple_unable_to_solve] clients={num_clients} iter={iterations} delay={delay_between}s")
     metrics = mk_metrics_container()
     lock = threading.Lock()
     debug_counter = {"printed": 0}
 
+    detail_fh = detail_w = None
+    detail_path = ""
+    if detail_csv:
+        detail_fh, detail_w, detail_path = open_detail_logger("simple_unable_to_solve")
+
     def simple_client(cid: int):
+        nonlocal detail_w
         for i in range(iterations):
+            t0 = time.perf_counter()
+            status = None
+            cls = "other"
+            final_url = ""
+            hist_codes = []
+            cookies_dict = {}
+            err = ""
             try:
                 s = requests.Session()
                 s.headers.update({"User-Agent": "SimpleBot/1.0"})
                 r = s.get(target, timeout=12, allow_redirects=True)
+                status = r.status_code
+                final_url = getattr(r, "url", "") or ""
+                hist_codes = [h.status_code for h in r.history] if r.history else []
+                cookies_dict = s.cookies.get_dict()
                 cls = classify_response(r)
-                with lock:
-                    metrics["total"] += 1
-                    if cls == "ok":
-                        metrics["ok_200"] += 1
-                    elif cls == "blocked":
-                        metrics["blocked"] += 1
-                    else:
-                        metrics["other_status"][r.status_code] += 1
+
                 if debug and debug_counter["printed"] < DEBUG_PRINT_FIRST:
                     with lock:
-                        print(f"[dbg][simple][cid={cid}] status={r.status_code} final_url={r.url} history={[h.status_code for h in r.history]} cookies={s.cookies.get_dict()}")
+                        print(f"[dbg][simple][cid={cid}] status={status} final_url={final_url} history={hist_codes} cookies={cookies_dict}")
                         debug_counter["printed"] += 1
-                s.cookies.clear()
             except Exception as e:
+                err = str(e)
+                with lock:
+                    metrics["errors"] += 1
+            finally:
+                t1 = time.perf_counter()
+                latency_ms = int((t1 - t0) * 1000)
+                had_pow_cookie = "pow-shield" in cookies_dict
+
                 with lock:
                     metrics["total"] += 1
-                    metrics["errors"] += 1
-                if debug and debug_counter["printed"] < DEBUG_PRINT_FIRST:
-                    with lock:
-                        print(f"[dbg][simple][cid={cid}] exception: {e}")
-                        debug_counter["printed"] += 1
+                    metrics["latency_sum_ms"] += latency_ms
+                    metrics["latency_count"] += 1
+                    if status is not None:
+                        if cls == "ok":
+                            metrics["ok_200"] += 1
+                        elif cls == "blocked":
+                            metrics["blocked"] += 1
+                        else:
+                            metrics["other_status"][status] += 1
+
+                    if detail_w:
+                        detail_w.writerow({
+                            "ts_iso": datetime.utcnow().isoformat(),
+                            "test": "simple",
+                            "worker_id": cid,
+                            "iteration": i,
+                            "status": status if status is not None else "",
+                            "class": cls,
+                            "latency_ms": latency_ms,
+                            "is_redirect": bool(hist_codes),
+                            "final_url": final_url,
+                            "location": "",  # redirects already followed
+                            "had_pow_cookie": had_pow_cookie,
+                            "error": err,
+                        })
+
             time.sleep(delay_between)
 
     threads = [threading.Thread(target=simple_client, args=(i,)) for i in range(num_clients)]
@@ -210,6 +342,11 @@ def simple_unable_to_solve(target: str, num_clients: int = 100, iterations: int 
     if CSV_LOG:
         path = write_csv_summary("simple_unable_to_solve_summary", metrics)
         print(f"  CSV -> {path}")
+        if detail_path:
+            print(f"  CSV detail -> {detail_path}")
+
+    if detail_fh:
+        close_detail_logger(detail_fh)
 
 # -------------------------------------
 # Test 3: selenium_solver
@@ -222,6 +359,7 @@ def selenium_solver(
     max_concurrent_browsers: int = 2,
     debug: bool = False,
     chrome_binary: Optional[str] = None,
+    detail_csv: bool = False,
 ):
     print(f"[selenium_solver] clients={browser_clients} max_concurrent={max_concurrent_browsers} iter={iterations} wait={wait_for_solve_s}s")
     metrics = mk_metrics_container()
@@ -229,37 +367,40 @@ def selenium_solver(
     sem = Semaphore(max_concurrent_browsers)
     debug_counter = {"printed": 0}
 
+    detail_fh = detail_w = None
+    detail_path = ""
+    if detail_csv:
+        detail_fh, detail_w, detail_path = open_detail_logger("selenium_solver")
+
     def make_driver():
         opts = Options()
-        # Commenta la prossima riga per test non-headless
+        # Comment next line for non-headless tests
         opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--window-size=1280,800")
 
-        # profilo isolato per ogni worker
+        # isolated profile per worker
         profile_dir = os.path.join(
             tempfile.gettempdir(),
             f"chromium-profile-{os.getpid()}-{int(time.time()*1000)}"
         )
         opts.add_argument(f"--user-data-dir={profile_dir}")
 
-        # bypass proxy di sistema (utile se l'ambiente ha proxy)
+        # bypass system proxy (useful in corp envs)
         opts.add_argument("--proxy-server=direct://")
         opts.add_argument("--proxy-bypass-list=*")
 
         if chrome_binary:
             opts.binary_location = chrome_binary
 
-        # log di chromedriver
         log_path = SOLVER_DEBUG_DIR / f"chromedriver_{os.getpid()}_{int(time.time())}.log"
         try:
             log_fh = open(str(log_path), "a", encoding="utf-8")
         except Exception:
             log_fh = None
 
-        # Service con log_output se supportato
         service = None
         if log_fh is not None:
             try:
@@ -276,18 +417,18 @@ def selenium_solver(
 
     def has_pow_cookie(driver) -> bool:
         try:
-            # 1) cookie via API Selenium
+            # 1) Selenium cookie API
             for c in driver.get_cookies():
                 if c.get("name") == "pow-shield":
                     return True
-            # 2) fallback: document.cookie
+            # 2) Fallback: document.cookie
             dc = driver.execute_script("return document.cookie") or ""
             return "pow-shield=" in dc
         except Exception:
             return False
 
     def browser_worker(bid: int):
-        nonlocal sem
+        nonlocal sem, detail_w
         with sem:
             try:
                 driver = make_driver()
@@ -300,8 +441,11 @@ def selenium_solver(
 
             for it in range(iterations):
                 solved = False
+                reason = "timeout"
                 cur_url = ""
                 tsnow = int(time.time())
+                t0 = time.perf_counter()
+
                 try:
                     driver.set_page_load_timeout(60)
                     driver.get(target)
@@ -358,17 +502,15 @@ def selenium_solver(
                         except Exception:
                             cur_url, src = "", ""
 
-                        # Segnale forte: cookie presente
+                        # Strong signal: cookie present
                         if has_pow_cookie(driver):
                             solved = True
                             reason = "cookie_present"
                             break
 
-                        # Segnale debole ma accettabile: siamo usciti da /pow e il testo non è la pagina di challenge
+                        # Weak but acceptable signal: left /pow and content isn't challenge
                         if "/pow" not in cur_url and not is_blocked_response_text(src):
-                            # breve stabilizzazione
-                            time.sleep(2.0)
-                            # ricontrolla cookie dopo stabilizzazione
+                            time.sleep(2.0)  # stabilization
                             if has_pow_cookie(driver):
                                 solved = True
                                 reason = "stable_then_cookie"
@@ -380,17 +522,13 @@ def selenium_solver(
                         time.sleep(poll)
                         waited += poll
 
-                    # Verifica “post-solve”: ricarica il target, MA non azzerare se il cookie c’è
-                    # --- after detecting solved = True inside the waiting loop ---
+                    # Post-solve stabilization
                     if solved:
-                        # Give the gateway some time to perform the redirect (some PoW pages redirect automatically)
                         post_solve_wait_s = 10.0
                         post_waited = 0.0
                         post_poll = 0.5
                         final_url = driver.current_url or ""
-                        final_cookie_val = None
 
-                        # Try to wait for redirect away from /pow
                         while post_waited < post_solve_wait_s:
                             try:
                                 cur_after = driver.current_url or ""
@@ -402,90 +540,13 @@ def selenium_solver(
                             time.sleep(post_poll)
                             post_waited += post_poll
 
-                        # If still on /pow, try to explicitly load the target (this can force the gateway to accept cookie)
                         if "/pow" in (driver.current_url or ""):
                             try:
                                 driver.get(target)
-                                # brief stabilization
                                 time.sleep(1.0)
                                 final_url = driver.current_url or ""
                             except Exception:
                                 pass
-
-                        # Read cookies via Selenium (HttpOnly cookies are visible here)
-                        try:
-                            cookies = driver.get_cookies()
-                            for c in cookies:
-                                if c.get("name") == "pow-shield":
-                                    final_cookie_val = c.get("value")
-                                    break
-                        except Exception:
-                            cookies = []
-
-                        # Save final debug artifacts (HTML / screenshot / cookies / meta)
-                        try:
-                            fname_base_final = SOLVER_DEBUG_DIR / f"solver_{bid}_iter{it}_{tsnow}_final"
-                            with open(str(fname_base_final) + ".html", "w", encoding="utf-8") as f:
-                                f.write(driver.page_source or "")
-                            try:
-                                driver.save_screenshot(str(fname_base_final) + ".png")
-                            except Exception:
-                                pass
-                            try:
-                                with open(str(fname_base_final) + ".cookies.json", "w", encoding="utf-8") as f:
-                                    json.dump(cookies, f, indent=2)
-                            except Exception:
-                                pass
-                            try:
-                                meta_file_final = str(fname_base_final) + ".meta.txt"
-                                nav_wd = None
-                                doc_cookie = None
-                                try:
-                                    nav_wd = driver.execute_script("return navigator.webdriver")
-                                except Exception:
-                                    pass
-                                try:
-                                    doc_cookie = driver.execute_script("return document.cookie")
-                                except Exception:
-                                    doc_cookie = None
-                                with open(meta_file_final, "w", encoding="utf-8") as mf:
-                                    mf.write(f"cur_url={driver.current_url}\n")
-                                    mf.write(f"final_url={final_url}\n")
-                                    mf.write(f"navigator.webdriver={nav_wd}\n")
-                                    mf.write(f"document.cookie={doc_cookie}\n")
-                                    mf.write(f"pow-shield_cookie_value={final_cookie_val}\n")
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            # non blocchiamo il flusso per errori di salvataggio
-                            print(f"[solver-{bid}] final debug save error: {e}")
-                        if debug and (not solved) and (not initial_saved) and debug_counter["printed"] < DEBUG_PRINT_FIRST:
-                            fname_base = SOLVER_DEBUG_DIR / f"solver_{bid}_iter{it}_{tsnow}"
-                        try:
-                            with open(str(fname_base) + ".html", "w", encoding="utf-8") as f:
-                                f.write(driver.page_source or "")
-                            driver.save_screenshot(str(fname_base) + ".png")
-                            try:
-                                with open(str(fname_base) + ".cookies.json", "w", encoding="utf-8") as f:
-                                    json.dump(driver.get_cookies(), f, indent=2)
-                            except Exception:
-                                pass
-                            try:
-                                meta_file = str(fname_base) + ".meta.txt"
-                                nav_wd = driver.execute_script("return navigator.webdriver")
-                                doc_cookie = driver.execute_script("return document.cookie")
-                                with open(meta_file, "w", encoding="utf-8") as mf:
-                                    mf.write(f"cur_url={driver.current_url}\n")
-                                    mf.write(f"navigator.webdriver={nav_wd}\n")
-                                    mf.write(f"document.cookie={doc_cookie}\n")
-                                    mf.write(f"reason={reason}\n")  # <--- aggiunta
-                            except Exception:
-                                pass
-
-                        except Exception as e:
-                            print(f"[solver-{bid}] debug save error: {e}")
-                        with lock:
-                            debug_counter["printed"] += 1
 
                     with lock:
                         metrics["total"] += 1
@@ -503,6 +564,40 @@ def selenium_solver(
                         with lock:
                             print(f"[dbg][solver-{bid}] iter={it} exception: {e}")
                             debug_counter["printed"] += 1
+                finally:
+                    t1 = time.perf_counter()
+                    latency_ms = int((t1 - t0) * 1000)
+                    with lock:
+                        metrics["latency_sum_ms"] += latency_ms
+                        metrics["latency_count"] += 1
+
+                    if detail_w:
+                        cookie_present = False
+                        try:
+                            for c in driver.get_cookies():
+                                if c.get("name") == "pow-shield":
+                                    cookie_present = True
+                                    break
+                        except Exception:
+                            pass
+                        try:
+                            detail_w.writerow({
+                                "ts_iso": datetime.utcnow().isoformat(),
+                                "test": "solver",
+                                "worker_id": bid,
+                                "iteration": it,
+                                "status": 200 if solved else "",
+                                "class": "ok" if solved else "blocked",
+                                "latency_ms": latency_ms,  # "time-to-solve"
+                                "is_redirect": "",
+                                "final_url": cur_url,
+                                "location": "",
+                                "had_pow_cookie": cookie_present,
+                                "error": "" if solved else reason,
+                            })
+                        except Exception:
+                            pass
+
                 time.sleep(0.2)
 
             try:
@@ -524,6 +619,10 @@ def selenium_solver(
     if CSV_LOG:
         path = write_csv_summary("selenium_solver_summary", metrics)
         print(f"  CSV -> {path}")
+        if detail_path:
+            print(f"  CSV detail -> {detail_path}")
+    if detail_fh:
+        close_detail_logger(detail_fh)
 
 # -------------------------
 # Minimal CLI / main
@@ -534,6 +633,10 @@ def main():
     ap.add_argument("--which", choices=["burst", "simple", "solver"], required=True, help="Which test to run")
     ap.add_argument("--confirm-owner", action="store_true", help="Confirm you own the target (required)")
     ap.add_argument("--debug", action="store_true", help="Enable debug prints for the first few requests")
+
+    # detail toggle
+    ap.add_argument("--detail-csv", action="store_true", default=DETAIL_CSV_DEFAULT,
+                    help="Also write per-request detail CSV (off by default)")
 
     # burst args
     ap.add_argument("--burst-threads", type=int, default=200, help="Number of threads for burst")
@@ -561,11 +664,11 @@ def main():
 
     try:
         if args.which == "burst":
-            volumetric_burst(args.target, num_threads=args.burst_threads, requests_per_thread=args.burst_reqs, debug=args.debug)
+            volumetric_burst(args.target, num_threads=args.burst_threads, requests_per_thread=args.burst_reqs, debug=args.debug, detail_csv=args.detail_csv)
         elif args.which == "simple":
-            simple_unable_to_solve(args.target, num_clients=args.simple_clients, iterations=args.simple_iter, delay_between=args.simple_delay, debug=args.debug)
+            simple_unable_to_solve(args.target, num_clients=args.simple_clients, iterations=args.simple_iter, delay_between=args.simple_delay, debug=args.debug, detail_csv=args.detail_csv)
         elif args.which == "solver":
-            selenium_solver(args.target, browser_clients=args.solver_clients, iterations=args.solver_iter, wait_for_solve_s=args.solver_wait, max_concurrent_browsers=args.solver_max_concurrent, debug=args.debug, chrome_binary=args.chrome_binary)
+            selenium_solver(args.target, browser_clients=args.solver_clients, iterations=args.solver_iter, wait_for_solve_s=args.solver_wait, max_concurrent_browsers=args.solver_max_concurrent, debug=args.debug, chrome_binary=args.chrome_binary, detail_csv=args.detail_csv)
     except KeyboardInterrupt:
         print("Interrupted by user. Exiting.")
 
