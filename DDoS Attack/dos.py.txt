@@ -287,8 +287,21 @@ def simple_unable_to_solve(target: str, num_clients: int = 100, iterations: int 
 
                 if debug and debug_counter["printed"] < DEBUG_PRINT_FIRST:
                     with lock:
-                        print(f"[dbg][simple][cid={cid}] status={status} final_url={final_url} history={hist_codes} cookies={cookies_dict}")
+                        sample = ((r.text or "")[:1200]).lower()
+                        tokens = ['proof-of-work','proof of work','challenge','calculating nonce','submitting result']
+                        matched = [tok for tok in tokens if tok in sample]
+                        jsflag = ('solve' in sample and 'javascript' in sample)
+
+                        print("[dbg][burst][tid={}] status={} class={} is_redirect={} loc={} url={} latency_ms={}"
+                            .format(tid, status, cls, is_redir, loc, final_url, latency_ms))
+
+                        print("[dbg][burst][tid={}] matched={} jsflag={} len={} body_snip={}"
+                            .format(tid, matched, jsflag, (len(r.text) if r.text else 0),
+                                    sample[:200].replace("\n", " ")))
+
                         debug_counter["printed"] += 1
+
+
             except Exception as e:
                 err = str(e)
                 with lock:

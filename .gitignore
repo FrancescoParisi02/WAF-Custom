@@ -2,6 +2,7 @@ pow-shield-test/conf.txt
 pow-shield-test/logs
 pow-shield-test/conf/ssl
 wazuh-agent-4.13.1-1.x86_64.rpm
+__pycache__
 results
 .venv
 .env*
