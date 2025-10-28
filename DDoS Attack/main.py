@@ -29,13 +29,17 @@ def parse_args():
     ap_s.add_argument("--detail-csv", action="store_true")
     ap_s.add_argument("--results-dir", default=str(DEFAULT_RESULTS_DIR))
 
-    # solver (stub per ora)
-    ap_v = sub.add_parser("solver", help="Headless browsers that solve PoW (stub)")
+    # solver
+    ap_v = sub.add_parser("solver", help="Headless browsers that solve PoW")
     ap_v.add_argument("--target", required=True)
     ap_v.add_argument("--browsers", type=int, default=4)
     ap_v.add_argument("--iter", type=int, default=3)
     ap_v.add_argument("--wait", type=float, default=12.0)
     ap_v.add_argument("--max-concurrent", type=int, default=2)
+    ap_v.add_argument("--chrome-binary", type=str, default=None, help="Custom Chromium/Chrome binary path")
+    ap_v.add_argument("--debug", action="store_true", help="Verbose debug for solver")
+    ap_v.add_argument("--assume-no-pow", action="store_true",
+                      help="Treat non-/pow landing without challenge markers as immediate success")
     ap_v.add_argument("--detail-csv", action="store_true")
     ap_v.add_argument("--results-dir", default=str(DEFAULT_RESULTS_DIR))
 
@@ -47,15 +51,31 @@ def main():
 
     if args.cmd == "burst":
         print(f"[burst] target={args.target} threads={args.threads} reqs/thread={args.reqs}")
-        test_burst.run(args.target, args.threads, args.reqs, results_dir, with_detail=args.detail_csv)
+        test_burst.run(
+            args.target, args.threads, args.reqs,
+            results_dir, with_detail=args.detail_csv
+        )
 
     elif args.cmd == "simple":
         print(f"[simple] target={args.target} clients={args.clients} iter={args.iter} delay={args.delay}s")
-        test_simple.run(args.target, args.clients, args.iter, args.delay, results_dir, with_detail=args.detail_csv)
+        test_simple.run(
+            args.target, args.clients, args.iter, args.delay,
+            results_dir, with_detail=args.detail_csv
+        )
 
     elif args.cmd == "solver":
-        print(f"[solver] target={args.target} browsers={args.browsers} iter={args.iter} wait={args.wait}s max_concurrent={args.max_concurrent}")
-        test_solver.run(args.target, args.browsers, args.iter, args.wait, args.max_concurrent, results_dir, with_detail=args.detail_csv)
+        print(
+            f"[solver] target={args.target} browsers={args.browsers} "
+            f"iter={args.iter} wait={args.wait}s max_concurrent={args.max_concurrent} "
+            f"chrome_binary={args.chrome_binary} debug={args.debug} "
+            f"assume_no_pow={args.assume_no_pow}"
+        )
+        test_solver.run(
+            args.target, args.browsers, args.iter, args.wait, args.max_concurrent,
+            results_dir, with_detail=args.detail_csv,
+            chrome_binary=args.chrome_binary, debug=args.debug,
+            assume_no_pow=args.assume_no_pow
+        )
 
 if __name__ == "__main__":
     main()

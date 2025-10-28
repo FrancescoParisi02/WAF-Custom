@@ -1,3 +1,2 @@
 requests>=2.31,<3
 selenium>=4.23,<5
-webdriver-manager>=4.0,<5

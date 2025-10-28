@@ -1,3 +1,10 @@
+"""Simple bots load test module.
+
+Simulates 'non-JS' clients that follow HTTP redirects using requests.Session.
+Each iteration issues a GET, classifies the outcome via `classify_simple`,
+and logs results through CsvLogger (summary and optional detail rows).
+"""
+
 from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,12 +17,42 @@ from utils.classify import classify_simple, ClassifyConfig
 
 UA_SIMPLE = "LoadTestSimple/1.0"
 
-def run(target: str, clients: int, iterations: int, delay_s: float, results_dir: Path,
-        with_detail: bool = False, timeout_s: float = 12.0, note: str = ""):
+def run(
+    target: str,
+    clients: int,
+    iterations: int,
+    delay_s: float,
+    results_dir: Path,
+    with_detail: bool = False,
+    timeout_s: float = 12.0,
+    note: str = ""
+):
+    """Execute the 'simple' test with requests-based clients.
+
+    Spawns `clients` concurrent workers; each worker performs `iterations`
+    GET requests to `target`, following redirects (no JS execution).
+    Responses are classified with `classify_simple` and aggregated into
+    summary metrics; optional per-request detail rows are written when
+    `with_detail` is True.
+
+    Args:
+        target: Absolute URL to hit.
+        clients: Number of concurrent simulated clients.
+        iterations: Requests performed by each client.
+        delay_s: Sleep between iterations for each client.
+        results_dir: Directory where CSV files will be written.
+        with_detail: If True, log one detail row per request.
+        timeout_s: Per-request timeout in seconds.
+        note: Free-form note stored in the summary CSV.
+
+    Returns:
+        None. Side effects: writes summary/detail CSV via CsvLogger.
+    """
     logger = CsvLogger(results_dir, "simple", with_detail)
     metrics = {"total":0, "passed":0, "blocked":0, "errors":0, "lat_sum_ms":0, "lat_n":0}
 
     def one_client(cid: int):
+        """Perform all iterations for a single simulated client and return detail rows."""
         s = requests.Session()
         s.headers.update({"User-Agent": UA_SIMPLE})
         out_rows = []
