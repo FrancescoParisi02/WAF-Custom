@@ -1,11 +1,11 @@
-"""Selenium-based solver load test (patched: requested/redirect/landed URLs + no-PoW fast path).
+"""Selenium-based solver load test (hard-timeout + strict-success ready).
 
-- Adds explicit CSV fields: requested_url, redirect_url (/pow), landed_url (final).
-- url_chain always starts with requested_url.
-- is_redirect computed deterministically (requested_url != redirect_url).
-- reason separated from error (error contains only real exceptions).
-- Keeps fast-path behavior and cookie normalization.
-- NEW: no-PoW detection & short-circuit success (with optional assume_no_pow flag).
+- Explicit CSV fields: requested_url, redirect_url, landed_url, url_chain, reason, error.
+- Deterministic is_redirect (requested_url != redirect_url).
+- Clean separation: 'reason' (classification cause) vs 'error' (exceptions).
+- Fast path for PoW-OFF (assume_no_pow) retained; can be disabled with --strict-success.
+- NEW: --hard-timeout-s -> per-attempt wall-clock cap that aborts as 'blocked (hard_timeout)'.
+- NEW: --strict-success -> requires leaving /pow and no challenge markers (disables no-PoW fast path).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ BLOCK_KEYWORDS = (
     "solve the challenge",
 )
 
-# Low-latency but safe timings
+# Timings
 POLL_SLEEP_S = 0.18
 POST_COOKIE_REPLACE_WAIT_S = 1.2
 STABILIZE_SLEEP_S = 0.35
@@ -167,7 +167,9 @@ def _attempt_once(
     wait_s: float,
     chrome_binary: Optional[str],
     debug: bool,
-    assume_no_pow: bool = False,
+    assume_no_pow: bool,
+    hard_timeout_s: float,
+    strict_success: bool,
 ) -> Tuple[bool, int, str, str, str, str, str, str, str]:
     """Perform one browser attempt.
 
@@ -181,17 +183,21 @@ def _attempt_once(
     error_text = ""
 
     requested_url = target
-    redirect_url = ""   # where we first land after initial navigation (often /pow)
+    redirect_url = ""   # first observed URL after initial navigation (often /pow)
     landed_url = ""     # final observed URL after solving/nudges
     last_src = ""
     chain: list[str] = []
 
+    def over_hard_cap() -> bool:
+        """Return True if hard-timeout is enabled and exceeded."""
+        return hard_timeout_s > 0.0 and (time.perf_counter() - t0) > hard_timeout_s
+
     try:
         drv = _make_driver(chrome_binary=chrome_binary, headless=True)
-        drv.set_page_load_timeout(max(40.0, wait_s + 5.0))
-        drv.set_script_timeout(max(40.0, wait_s + 5.0))
+        # Set generous Selenium timeouts to avoid masking our own hard cap
+        drv.set_page_load_timeout(max(60.0, wait_s + 20.0))
+        drv.set_script_timeout(max(60.0, wait_s + 20.0))
 
-        # Always include the requested URL in the chain (even if redirect is instant)
         chain.append(requested_url)
 
         # Initial navigation
@@ -203,35 +209,48 @@ def _attempt_once(
             redirect_url = ""
             last_src = ""
 
+        if over_hard_cap():
+            solved = False
+            reason = "hard_timeout"
+            landed_url = redirect_url or requested_url
+            raise StopIteration
+
         if redirect_url and (not chain or redirect_url != chain[-1]):
             chain.append(redirect_url)
         if debug:
             print(f"[solver][dbg] requested={requested_url} redirect={redirect_url}")
 
         # -------------------------
-        # NEW: Immediate no-PoW fast path
-        # If we are NOT on /pow and page doesn't look like a challenge, treat as success.
-        # If --assume-no-pow is set, be even more aggressive.
+        # No-PoW fast path (disabled if strict_success=True)
         cur_is_pow = ("/pow" in (redirect_url or "").lower())
         looks_blocked = _is_blocked_text(last_src)
-        if assume_no_pow:
-            if not looks_blocked and not cur_is_pow:
-                solved = True
-                reason = "no_pow_assumed"
-                landed_url = redirect_url or requested_url
-                raise StopIteration  # jump to post-handling
-        else:
-            if not looks_blocked and not cur_is_pow:
-                solved = True
-                reason = "no_pow_detected"
-                landed_url = redirect_url or requested_url
-                raise StopIteration
+
+        if not strict_success:
+            if assume_no_pow:
+                if not looks_blocked and not cur_is_pow:
+                    solved = True
+                    reason = "no_pow_assumed"
+                    landed_url = redirect_url or requested_url
+                    raise StopIteration
+            else:
+                if not looks_blocked and not cur_is_pow:
+                    solved = True
+                    reason = "no_pow_detected"
+                    landed_url = redirect_url or requested_url
+                    raise StopIteration
         # -------------------------
 
         deadline = time.time() + wait_s
         last_seen_url = redirect_url or requested_url
 
+        # Polling window
         while time.time() < deadline:
+            if over_hard_cap():
+                solved = False
+                reason = "hard_timeout"
+                landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                break
+
             try:
                 cur_url = drv.current_url or ""
                 src = drv.page_source or ""
@@ -245,21 +264,27 @@ def _attempt_once(
                 if debug:
                     print(f"[dbg][hop] {last_seen_url}")
 
-            # If we ever find ourselves out of /pow and not looking blocked, we're done.
+            # Success condition (always required if strict_success=True)
             if cur_url and "/pow" not in cur_url.lower() and not _is_blocked_text(src):
                 solved = True
                 reason = "left_pow_or_normal_page"
                 landed_url = cur_url
                 break
 
-            # Fast path: cookie present -> normalize cookie -> jump to target
+            # Cookie path
             if _has_pow_cookie(drv):
+                if over_hard_cap():
+                    solved = False
+                    reason = "hard_timeout"
+                    landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                    break
+
                 try:
                     _ensure_root_cookie(drv, requested_url)
                 except Exception:
                     pass
 
-                # Attempt 1: GET to requested target
+                # Attempt 1: GET
                 try:
                     drv.get(requested_url)
                 except Exception:
@@ -268,6 +293,11 @@ def _attempt_once(
                 end_wait = time.time() + 3.0
                 off_pow = False
                 while time.time() < end_wait:
+                    if over_hard_cap():
+                        solved = False
+                        reason = "hard_timeout"
+                        landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                        break
                     try:
                         cur2 = drv.current_url or ""
                         src2 = drv.page_source or ""
@@ -285,8 +315,8 @@ def _attempt_once(
                         break
                     time.sleep(0.15)
 
-                # Attempt 2: JS replace to the requested target
-                if not off_pow:
+                if not off_pow and not over_hard_cap():
+                    # Attempt 2: JS replace
                     try:
                         drv.execute_script("window.location.replace(arguments[0])", requested_url)
                     except Exception:
@@ -294,6 +324,11 @@ def _attempt_once(
 
                     end_wait2 = time.time() + 2.0
                     while time.time() < end_wait2:
+                        if over_hard_cap():
+                            solved = False
+                            reason = "hard_timeout"
+                            landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                            break
                         try:
                             cur3 = drv.current_url or ""
                             src3 = drv.page_source or ""
@@ -311,6 +346,12 @@ def _attempt_once(
                             break
                         time.sleep(0.15)
 
+                if over_hard_cap():
+                    solved = False
+                    reason = "hard_timeout"
+                    landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                    break
+
                 if off_pow:
                     solved = True
                     reason = "cookie_then_target"
@@ -318,13 +359,19 @@ def _attempt_once(
                     solved = False
                     reason = "cookie_but_stuck"
                     landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
-
                 break  # exit polling loop
+
+            time.sleep(POLL_SLEEP_S)
 
         # Post-solve nudges if still on /pow
         if solved:
             if "/pow" in (landed_url or last_seen_url or "").lower():
                 for _ in range(NUDGES_MAX):
+                    if over_hard_cap():
+                        solved = False
+                        reason = "hard_timeout"
+                        landed_url = (drv.current_url or last_seen_url or redirect_url or requested_url)
+                        break
                     hops = _nudge_to_root(drv, requested_url)
                     for h in hops:
                         url_only = h.split(" ", 1)[-1]
@@ -347,7 +394,7 @@ def _attempt_once(
                 except Exception:
                     landed_url = last_seen_url or redirect_url or requested_url
 
-        if not solved:
+        if not solved and reason != "hard_timeout":
             try:
                 src = drv.page_source or ""
                 last_src = src or last_src
@@ -360,7 +407,7 @@ def _attempt_once(
             landed_url = last_seen_url or redirect_url or requested_url
 
     except StopIteration:
-        # Used for intentional early-exit fast paths; 'solved'/'reason' already set
+        # Intentional early-exit fast paths; 'solved'/'reason' already set
         try:
             landed_url = landed_url or redirect_url or requested_url
         except Exception:
@@ -403,7 +450,9 @@ def run(
     *,
     chrome_binary: Optional[str] = None,
     debug: bool = False,
-    assume_no_pow: bool = False,  # NEW: aggressive fast-path for known PoW-OFF runs
+    assume_no_pow: bool = False,
+    hard_timeout_s: float = 0.0,
+    strict_success: bool = False,
 ):
     """Execute the Selenium-based solver test and write CSV outputs."""
     test_name = "solver"
@@ -431,6 +480,8 @@ def run(
                         chrome_binary=chrome_binary,
                         debug=debug,
                         assume_no_pow=assume_no_pow,
+                        hard_timeout_s=hard_timeout_s,
+                        strict_success=strict_success,
                     )
 
                 is_exception = reason.endswith("Exception") or reason in {
@@ -451,7 +502,7 @@ def run(
                 if cls == "ok" and (not landed_url or "/pow" in landed_url.lower()):
                     cls = "blocked"
 
-                # If we short-circuited as solved and we're not on /pow and page isn't challenge-like, force ok
+                # If we solved but classifier was conservative, force ok when truly off /pow and no challenge text
                 if cls != "ok" and solved:
                     if (landed_url and "/pow" not in landed_url.lower()) and not _is_blocked_text(last_src):
                         cls = "ok"
@@ -512,7 +563,11 @@ def run(
                         "error": f"{type(e).__name__}: {e}",
                     })
 
-    print(f"[solver] target={target} browsers={browsers} iter={iterations} wait={wait}s max_concurrent={max_concurrent} assume_no_pow={assume_no_pow}")
+    print(
+        f"[solver] target={target} browsers={browsers} iter={iterations} wait={wait}s "
+        f"max_concurrent={max_concurrent} assume_no_pow={assume_no_pow} "
+        f"hard_timeout_s={hard_timeout_s} strict_success={strict_success}"
+    )
 
     threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(browsers)]
     for t in threads:
@@ -534,7 +589,11 @@ def run(
         "pct_passed": _pct(passed, requests_sent),
         "pct_blocked": _pct(blocked, requests_sent),
         "pct_errors": _pct(errors, requests_sent),
-        "note": f"browsers={browsers} iter={iterations} wait={wait}s max_concurrent={max_concurrent} assume_no_pow={assume_no_pow}",
+        "note": (
+            f"browsers={browsers} iter={iterations} wait={wait}s "
+            f"max_concurrent={max_concurrent} assume_no_pow={assume_no_pow} "
+            f"hard_timeout_s={hard_timeout_s} strict_success={strict_success}"
+        ),
     }
     logger.write_summary(summary_row)
     logger.close()
